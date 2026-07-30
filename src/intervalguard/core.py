@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+import functools
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Callable
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass
+class Event:
+    name: str
+    start_time: datetime
+    end_time: datetime
+    validity_window_seconds: int
+    depends_on: list[str] = field(default_factory=list)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+
+
+class StaleReadError(RuntimeError):
+    pass
+
+
+registry: list[Event] = []
+
+
+def clear_registry() -> None:
+    registry.clear()
+
+
+def relation(a: Event, b: Event) -> str:
+    if a.end_time < b.start_time:
+        return "before"
+    if a.end_time == b.start_time:
+        return "meets"
+    if a.start_time >= b.end_time:
+        return "after"
+    if a.start_time >= b.start_time and a.end_time <= b.end_time:
+        return "during"
+    return "overlaps"
+
+
+def is_stale(event: Event, now: datetime) -> bool:
+    return now - event.end_time > timedelta(seconds=event.validity_window_seconds)
+
+
+def _supersedes(later: Event, dependency: Event) -> bool:
+    """True when `later` touched the same resource after `dependency` observed it."""
+    if later.id == dependency.id or later.name != dependency.name:
+        return False
+    if later.end_time <= dependency.end_time:
+        return False
+    return relation(dependency, later) in ("before", "meets", "overlaps", "during")
+
+
+def _dependency_issues(
+    event: Event, all_events: list[Event], now: datetime | None = None
+) -> list[tuple[Event, str]]:
+    now = now or _now()
+    by_id = {e.id: e for e in all_events}
+    issues: list[tuple[Event, str]] = []
+
+    for dep_id in event.depends_on:
+        dep = by_id.get(dep_id)
+        if dep is None:
+            continue
+
+        superseding = next(
+            (e for e in all_events if _supersedes(e, dep)),
+            None,
+        )
+        if superseding is not None:
+            issues.append(
+                (
+                    dep,
+                    f"superseded by '{superseding.name}' (id={superseding.id}) "
+                    f"at {_iso(superseding.end_time)}",
+                )
+            )
+        elif is_stale(dep, now):
+            age = int((now - dep.end_time).total_seconds())
+            issues.append(
+                (
+                    dep,
+                    f"read at {_iso(dep.end_time)} has aged {age}s, past its "
+                    f"{dep.validity_window_seconds}s validity window",
+                )
+            )
+
+    return issues
+
+
+def check_dependencies(
+    event: Event, all_events: list[Event], now: datetime | None = None
+) -> list[str]:
+    return [dep.name for dep, _ in _dependency_issues(event, all_events, now)]
+
+
+def tracked(name: str, validity_window_seconds: int) -> Callable:
+    """Wrap a tool call so its reads are registered and its dependencies verified.
+
+    The wrapper accepts a `depends_on` keyword listing prior event IDs this call
+    relies on; it is consumed by intervalguard and not passed to the function.
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, depends_on: list[str] | None = None, **kwargs):
+            start = _now()
+            result = func(*args, **kwargs)
+            event = Event(
+                name=name,
+                start_time=start,
+                end_time=_now(),
+                validity_window_seconds=validity_window_seconds,
+                depends_on=list(depends_on or []),
+            )
+            registry.append(event)
+            wrapper.last_event = event
+
+            issues = _dependency_issues(event, registry, now=event.end_time)
+            if issues:
+                dep, reason = issues[0]
+                raise StaleReadError(
+                    f"event '{dep.name}' (id={dep.id}) is stale: {reason}"
+                )
+            return result
+
+        wrapper.last_event = None
+        return wrapper
+
+    return decorator
