@@ -117,13 +117,15 @@ def run_instrumented() -> None:
     banner("RUN 2 -- WITH intervalguard")
     reset_world()
 
-    fetch_status = tracked(name=RESOURCE, validity_window_seconds=30)(slow_fetch)
+    fetch_status = tracked(name=RESOURCE, validity_window_seconds=30, writes=False)(
+        slow_fetch
+    )
     write_status = tracked(name=RESOURCE, validity_window_seconds=30, writes=True)(
         operator_updates_reactor
     )
-    apply_correction = tracked(name="debate:consensus", validity_window_seconds=30)(
-        decide_correction
-    )
+    apply_correction = tracked(
+        name="debate:consensus", validity_window_seconds=30, writes=False
+    )(decide_correction)
 
     debater_alpha()
     debater_beta()

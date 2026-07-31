@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -132,8 +133,18 @@ def check_dependencies(
     return [dep.name for dep, _ in _dependency_issues(event, all_events, now)]
 
 
+class _Unspecified:
+    """Sentinel: distinguishes 'no writes= given' from an explicit writes=False."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<unspecified>"
+
+
+UNSPECIFIED = _Unspecified()
+
+
 def tracked(
-    name: str, validity_window_seconds: int, writes: bool = False
+    name: str, validity_window_seconds: int, writes: bool | _Unspecified = UNSPECIFIED
 ) -> Callable:
     """Wrap a tool call so its reads are registered and its dependencies verified.
 
@@ -141,15 +152,28 @@ def tracked(
     relies on; it is consumed by intervalguard and not passed to the function.
 
     Pass `writes=True` for calls that modify the resource. Only writes can
-    supersede an earlier read of the same `name`.
+    supersede an earlier read of the same `name`. Omitting `writes` entirely is
+    treated as a read, but warns on every call: a forgotten `writes=True` on a
+    real write is invisible otherwise.
 
     The Event produced by a call is available to that caller via `last_event()`,
     which is context-local rather than stored on the wrapper.
     """
 
+    unspecified = isinstance(writes, _Unspecified)
+    is_write = False if unspecified else bool(writes)
+
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, depends_on: list[str] | None = None, **kwargs):
+            if unspecified:
+                warnings.warn(
+                    f"tracked call {func.__name__!r} (name={name!r}) did not "
+                    f"specify writes=; it is being treated as a read. Pass "
+                    f"writes=True if it modifies the resource, or writes=False "
+                    f"to state that it does not.",
+                    stacklevel=2,
+                )
             start = _now()
             result = func(*args, **kwargs)
             event = Event(
@@ -158,7 +182,7 @@ def tracked(
                 end_time=_now(),
                 validity_window_seconds=validity_window_seconds,
                 depends_on=list(depends_on or []),
-                kind="write" if writes else "read",
+                kind="write" if is_write else "read",
             )
             registry.append(event)
             _last_event.set(event)

@@ -23,7 +23,7 @@ Python 3.12+. Standard library only; `pytest` is the sole dev dependency.
 ```python
 from intervalguard import tracked, last_event, StaleReadError
 
-@tracked(name="evidence:reactor_2_status", validity_window_seconds=30)
+@tracked(name="evidence:reactor_2_status", validity_window_seconds=30, writes=False)
 def fetch_status():
     return evidence_store["reactor_2_status"]
 
@@ -31,7 +31,7 @@ def fetch_status():
 def write_status(value):
     evidence_store["reactor_2_status"] = value
 
-@tracked(name="debate:consensus", validity_window_seconds=30)
+@tracked(name="debate:consensus", validity_window_seconds=30, writes=False)
 def apply_correction(observed):
     return f"consensus based on {observed}"
 

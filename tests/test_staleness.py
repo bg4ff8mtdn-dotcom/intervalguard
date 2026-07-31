@@ -1,5 +1,6 @@
 import threading
 import time
+import warnings
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -89,9 +90,9 @@ def test_check_dependencies_ignores_earlier_writes():
 def test_tracked_raises_on_superseded_dependency():
     clear_registry()
 
-    read = tracked("price", 300)(lambda: 100)
+    read = tracked("price", 300, writes=False)(lambda: 100)
     write = tracked("price", 300, writes=True)(lambda: time.sleep(0.05) or 101)
-    decide = tracked("decide", 300)(lambda v: v * 2)
+    decide = tracked("decide", 300, writes=False)(lambda v: v * 2)
 
     read()
     read_event = last_event()
@@ -108,8 +109,8 @@ def test_tracked_raises_on_superseded_dependency():
 def test_tracked_returns_result_when_dependencies_are_fresh():
     clear_registry()
 
-    read = tracked("price", 300)(lambda: 100)
-    decide = tracked("decide", 300)(lambda v: v * 2)
+    read = tracked("price", 300, writes=False)(lambda: 100)
+    decide = tracked("decide", 300, writes=False)(lambda v: v * 2)
 
     read()
     assert decide(100, depends_on=[last_event().id]) == 200
@@ -133,8 +134,8 @@ def test_later_read_of_same_resource_does_not_supersede_earlier_read():
 def test_two_concurrent_pollers_do_not_invalidate_each_others_reads():
     clear_registry()
 
-    poll = tracked("price", 300)(lambda: time.sleep(0.05) or 100)
-    decide = tracked("decide", 300)(lambda v: v * 2)
+    poll = tracked("price", 300, writes=False)(lambda: time.sleep(0.05) or 100)
+    decide = tracked("decide", 300, writes=False)(lambda v: v * 2)
 
     poll()
     agent_a_read = last_event()
@@ -159,8 +160,8 @@ def test_unknown_dependency_id_raises_instead_of_being_silently_skipped():
 def test_tracked_raises_unknown_dependency_when_dependency_was_evicted():
     clear_registry()
 
-    read = tracked("price", 300)(lambda: 100)
-    decide = tracked("decide", 300)(lambda v: v * 2)
+    read = tracked("price", 300, writes=False)(lambda: 100)
+    decide = tracked("decide", 300, writes=False)(lambda v: v * 2)
 
     read()
     read_event = last_event()
@@ -178,7 +179,7 @@ def test_tracked_raises_unknown_dependency_when_dependency_was_evicted():
 def test_concurrent_callers_do_not_overwrite_each_others_last_event():
     clear_registry()
 
-    poll = tracked("price", 300)(lambda tag: time.sleep(0.1) or tag)
+    poll = tracked("price", 300, writes=False)(lambda tag: time.sleep(0.1) or tag)
     seen: dict[str, object] = {}
 
     def worker(tag: str, delay: float) -> None:
@@ -199,3 +200,43 @@ def test_concurrent_callers_do_not_overwrite_each_others_last_event():
     assert seen["a"].id != seen["b"].id
     assert seen["a"].end_time < seen["b"].end_time
     assert {seen["a"].id, seen["b"].id} <= {e.id for e in registry}
+
+
+# --- regression: an unannotated call must not look like a declared read -----
+
+
+def test_omitting_writes_warns_that_read_vs_write_is_unstated():
+    clear_registry()
+
+    ambiguous = tracked("price", 300)(lambda: 100)
+
+    with pytest.warns(UserWarning, match="did not specify writes="):
+        ambiguous()
+
+    assert registry[-1].kind == "read"  # behavior unchanged: still a read
+
+
+def test_explicit_writes_false_does_not_warn():
+    clear_registry()
+
+    read = tracked("price", 300, writes=False)(lambda: 100)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        read()
+
+    assert caught == []
+    assert registry[-1].kind == "read"
+
+
+def test_explicit_writes_true_does_not_warn_and_marks_a_write():
+    clear_registry()
+
+    write = tracked("price", 300, writes=True)(lambda: 101)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        write()
+
+    assert caught == []
+    assert registry[-1].kind == "write"
