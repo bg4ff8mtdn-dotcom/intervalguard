@@ -3,9 +3,11 @@
 from intervalguard.core import (
     Event,
     StaleReadError,
+    UnknownDependencyError,
     check_dependencies,
     clear_registry,
     is_stale,
+    last_event,
     registry,
     relation,
     tracked,
@@ -14,9 +16,11 @@ from intervalguard.core import (
 __all__ = [
     "Event",
     "StaleReadError",
+    "UnknownDependencyError",
     "check_dependencies",
     "clear_registry",
     "is_stale",
+    "last_event",
     "registry",
     "relation",
     "tracked",

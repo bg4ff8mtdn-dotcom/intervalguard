@@ -11,7 +11,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from intervalguard import StaleReadError, clear_registry, tracked  # noqa: E402
+from intervalguard import (  # noqa: E402
+    StaleReadError,
+    clear_registry,
+    last_event,
+    tracked,
+)
 
 RESOURCE = "evidence:reactor_2_status"
 FETCH_LATENCY = 0.8
@@ -113,7 +118,7 @@ def run_instrumented() -> None:
     reset_world()
 
     fetch_status = tracked(name=RESOURCE, validity_window_seconds=30)(slow_fetch)
-    write_status = tracked(name=RESOURCE, validity_window_seconds=30)(
+    write_status = tracked(name=RESOURCE, validity_window_seconds=30, writes=True)(
         operator_updates_reactor
     )
     apply_correction = tracked(name="debate:consensus", validity_window_seconds=30)(
@@ -125,7 +130,7 @@ def run_instrumented() -> None:
 
     say("Corrector", f"fetching {RESOURCE} ...")
     cached_status = fetch_status()
-    read_event = fetch_status.last_event
+    read_event = last_event()
     say(
         "Corrector",
         f"got '{cached_status}' (tracked as event id={read_event.id}, 30s window)",

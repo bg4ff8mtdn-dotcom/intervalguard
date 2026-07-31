@@ -21,13 +21,13 @@ Python 3.12+. Standard library only; `pytest` is the sole dev dependency.
 ## Usage
 
 ```python
-from intervalguard import tracked, StaleReadError
+from intervalguard import tracked, last_event, StaleReadError
 
 @tracked(name="evidence:reactor_2_status", validity_window_seconds=30)
 def fetch_status():
     return evidence_store["reactor_2_status"]
 
-@tracked(name="evidence:reactor_2_status", validity_window_seconds=30)
+@tracked(name="evidence:reactor_2_status", validity_window_seconds=30, writes=True)
 def write_status(value):
     evidence_store["reactor_2_status"] = value
 
@@ -36,7 +36,7 @@ def apply_correction(observed):
     return f"consensus based on {observed}"
 
 status = fetch_status()
-read_event = fetch_status.last_event
+read_event = last_event()
 
 write_status("OFFLINE")          # someone else changes the world
 
@@ -48,22 +48,25 @@ except StaleReadError as exc:
     # superseded by 'evidence:reactor_2_status' (id=190c1b88) at 2026-07-30T18:44:41Z
 ```
 
-`depends_on` is consumed by the decorator and never passed to your function. Each wrapped function exposes `.last_event` so the next call can declare what it read from.
+`depends_on` is consumed by the decorator and never passed to your function. `last_event()` returns the Event your most recent tracked call produced, so the next call can declare what it read from. It is context-local, so concurrent callers of the same function each see their own event.
 
 ## What it checks
 
 A dependency is reported stale when either:
 
 1. **Expiry** — `now - read.end_time` exceeds the read's `validity_window_seconds`.
-2. **Supersession** — a later event with the same `name` ended after the read did, meaning the underlying resource was written while the result was in hand. This fires even when the read is still inside its window.
+2. **Supersession** — a later *write* to the same `name` ended after the read did, meaning the underlying resource changed while the result was in hand. This fires even when the read is still inside its window. Only writes supersede: another agent reading the same resource never invalidates your read.
+
+A declared dependency id that is not in the registry raises `UnknownDependencyError` rather than being skipped — an unverifiable dependency is not a verified one.
 
 ## API
 
-- `Event` — `id`, `name`, `start_time`, `end_time`, `validity_window_seconds`, `depends_on`.
+- `Event` — `id`, `name`, `start_time`, `end_time`, `validity_window_seconds`, `depends_on`, `kind` (`"read"` or `"write"`).
 - `relation(a, b) -> str` — one of `before`, `meets`, `overlaps`, `during`, `after`, from the two intervals alone.
 - `is_stale(event, now) -> bool`
 - `check_dependencies(event, all_events, now=None) -> list[str]` — names of dependencies that expired or were superseded.
-- `tracked(name, validity_window_seconds)` — decorator; registers an `Event` per call and raises `StaleReadError` before returning if any declared dependency is stale.
+- `tracked(name, validity_window_seconds, writes=False)` — decorator; registers an `Event` per call and raises `StaleReadError` before returning if any declared dependency is stale.
+- `last_event()` — the `Event` produced by the most recent tracked call in the current context.
 - `registry` / `clear_registry()` — the in-memory event log.
 
 ## Run the demo

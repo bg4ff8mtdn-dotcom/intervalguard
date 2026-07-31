@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import functools
 import uuid
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ class Event:
     end_time: datetime
     validity_window_seconds: int
     depends_on: list[str] = field(default_factory=list)
+    kind: str = "read"  # "read" or "write"
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
 
@@ -29,7 +31,22 @@ class StaleReadError(RuntimeError):
     pass
 
 
+class UnknownDependencyError(LookupError):
+    """A declared dependency id could not be found in the registry."""
+
+
 registry: list[Event] = []
+
+# Each call gets its own view of "the event I just produced", so concurrent
+# callers of the same tracked function cannot clobber each other.
+_last_event: contextvars.ContextVar[Event | None] = contextvars.ContextVar(
+    "intervalguard_last_event", default=None
+)
+
+
+def last_event() -> Event | None:
+    """The Event produced by the most recent tracked call in this context."""
+    return _last_event.get()
 
 
 def clear_registry() -> None:
@@ -53,7 +70,14 @@ def is_stale(event: Event, now: datetime) -> bool:
 
 
 def _supersedes(later: Event, dependency: Event) -> bool:
-    """True when `later` touched the same resource after `dependency` observed it."""
+    """True when `later` wrote the resource after `dependency` observed it.
+
+    Only writes can invalidate a prior read. Another read of the same resource
+    changes nothing about it, so concurrent pollers must not invalidate each
+    other.
+    """
+    if later.kind != "write":
+        return False
     if later.id == dependency.id or later.name != dependency.name:
         return False
     if later.end_time <= dependency.end_time:
@@ -71,7 +95,11 @@ def _dependency_issues(
     for dep_id in event.depends_on:
         dep = by_id.get(dep_id)
         if dep is None:
-            continue
+            raise UnknownDependencyError(
+                f"event '{event.name}' (id={event.id}) declares dependency "
+                f"id={dep_id}, which is not in the registry: it cannot be "
+                f"verified, so this call must not be treated as checked"
+            )
 
         superseding = next(
             (e for e in all_events if _supersedes(e, dep)),
@@ -104,11 +132,19 @@ def check_dependencies(
     return [dep.name for dep, _ in _dependency_issues(event, all_events, now)]
 
 
-def tracked(name: str, validity_window_seconds: int) -> Callable:
+def tracked(
+    name: str, validity_window_seconds: int, writes: bool = False
+) -> Callable:
     """Wrap a tool call so its reads are registered and its dependencies verified.
 
     The wrapper accepts a `depends_on` keyword listing prior event IDs this call
     relies on; it is consumed by intervalguard and not passed to the function.
+
+    Pass `writes=True` for calls that modify the resource. Only writes can
+    supersede an earlier read of the same `name`.
+
+    The Event produced by a call is available to that caller via `last_event()`,
+    which is context-local rather than stored on the wrapper.
     """
 
     def decorator(func: Callable) -> Callable:
@@ -122,9 +158,10 @@ def tracked(name: str, validity_window_seconds: int) -> Callable:
                 end_time=_now(),
                 validity_window_seconds=validity_window_seconds,
                 depends_on=list(depends_on or []),
+                kind="write" if writes else "read",
             )
             registry.append(event)
-            wrapper.last_event = event
+            _last_event.set(event)
 
             issues = _dependency_issues(event, registry, now=event.end_time)
             if issues:
@@ -134,7 +171,6 @@ def tracked(name: str, validity_window_seconds: int) -> Callable:
                 )
             return result
 
-        wrapper.last_event = None
         return wrapper
 
     return decorator
