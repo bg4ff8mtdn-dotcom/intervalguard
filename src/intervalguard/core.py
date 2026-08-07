@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import itertools
 import uuid
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+
+
+_counter = itertools.count()
 
 
 def _now() -> datetime:
@@ -26,6 +30,7 @@ class Event:
     depends_on: list[str] = field(default_factory=list)
     kind: str = "read"  # "read" or "write"
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    seq: int = field(default_factory=lambda: next(_counter))
 
 
 class StaleReadError(RuntimeError):
@@ -81,8 +86,13 @@ def _supersedes(later: Event, dependency: Event) -> bool:
         return False
     if later.id == dependency.id or later.name != dependency.name:
         return False
-    if later.end_time <= dependency.end_time:
+    if later.end_time < dependency.end_time:
         return False
+    if later.end_time == dependency.end_time:
+        # Identical timestamps carry no ordering information -- the clock is
+        # coarser than the two operations. Fall back to creation order, which
+        # is exact.
+        return later.seq > dependency.seq
     return relation(dependency, later) in ("before", "meets", "overlaps", "during")
 
 

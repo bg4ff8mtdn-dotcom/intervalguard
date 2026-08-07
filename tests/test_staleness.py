@@ -21,9 +21,18 @@ BASE = datetime(2026, 7, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def event(
-    start_s, end_s, name="price", window=30, depends_on=None, id=None, kind="read"
+    start_s,
+    end_s,
+    name="price",
+    window=30,
+    depends_on=None,
+    id=None,
+    kind="read",
+    seq=None,
 ) -> Event:
     kwargs = {} if id is None else {"id": id}
+    if seq is not None:
+        kwargs["seq"] = seq
     return Event(
         name=name,
         start_time=BASE + timedelta(seconds=start_s),
@@ -240,3 +249,29 @@ def test_explicit_writes_true_does_not_warn_and_marks_a_write():
 
     assert caught == []
     assert registry[-1].kind == "write"
+
+
+# --- regression: identical timestamps must not lose the ordering ------------
+#
+# When the clock is coarser than the operations, a write and a read can carry
+# byte-identical timestamps. Ordering then comes from `seq`, not the clock.
+# Both cases below are constructed with explicit equal timestamps and explicit
+# seq values, so nothing here depends on timing.
+
+
+def test_same_timestamp_write_before_read_is_not_superseding():
+    write = event(0, 0, id="write1", kind="write", seq=1)
+    read = event(0, 0, id="read1", kind="read", seq=2)  # read saw the new value
+    consumer = event(0, 0, name="decide", depends_on=["read1"], seq=3)
+
+    assert write.end_time == read.end_time
+    assert check_dependencies(consumer, [write, read, consumer], now=BASE) == []
+
+
+def test_same_timestamp_read_before_write_is_superseded():
+    read = event(0, 0, id="read1", kind="read", seq=1)
+    write = event(0, 0, id="write1", kind="write", seq=2)  # write landed after
+    consumer = event(0, 0, name="decide", depends_on=["read1"], seq=3)
+
+    assert read.end_time == write.end_time
+    assert check_dependencies(consumer, [read, write, consumer], now=BASE) == ["price"]

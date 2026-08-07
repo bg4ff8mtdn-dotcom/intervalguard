@@ -61,7 +61,7 @@ A declared dependency id that is not in the registry raises `UnknownDependencyEr
 
 ## API
 
-- `Event` — `id`, `name`, `start_time`, `end_time`, `validity_window_seconds`, `depends_on`, `kind` (`"read"` or `"write"`).
+- `Event` — `id`, `name`, `start_time`, `end_time`, `validity_window_seconds`, `depends_on`, `kind` (`"read"` or `"write"`), and `seq`, a monotonic counter that breaks ties when two events carry identical timestamps.
 - `relation(a, b) -> str` — one of `before`, `meets`, `overlaps`, `during`, `after`, from the two intervals alone.
 - `is_stale(event, now) -> bool`
 - `check_dependencies(event, all_events, now=None) -> list[str]` — names of dependencies that expired or were superseded.
